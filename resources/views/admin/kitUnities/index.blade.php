@@ -1,0 +1,63 @@
+@extends('adminlte::page')
+
+@section('title', 'Kits')
+
+@section('content')
+<div>
+    <br>
+    <div class="search-form mb-4" style="display:flex; gap:10px; align-items:center;">
+        <input id="search" class="form-control search-input" name="search" type="text" placeholder="Procurar kits..." style="width: 24%;" />
+        <select id="sort" class="form-control" style="width: 220px;">
+            <option value="nome">Ordenar por: Nome (A-Z)</option>
+            <option value="lia">Ordenar por: Código LIA</option>
+        </select>
+    </div>
+    <br>
+   <div class="row mycard">
+
+      @if($unidades->count() > 0)
+        @foreach($unidades as $unidade)
+        <div class="col-sm-3 mb-4">
+            <div class="card h-100">
+                <div class="card-body d-flex flex-column justify-content-center text-center">
+                  
+                    <h5 class="card-title ">{{ $unidade->kit->name }}</h5>
+                    <small class="text-muted mb-2">Ref: {{ $unidade->ipvc_ref ?? 'N/A' }}</small>
+                    
+                  
+                    <p class="text-muted mb-2">LIA: {{ $unidade->lia_code }}</p>
+                    
+                  
+                    <p class="card-text card-text-preco">{{ number_format($unidade->kit->price_day, 2, ',', '.') }} € / dia</p>
+                    
+                  
+                    <a class="btn btn-primary mx-auto" style="width: 140px;" href="{{ route('kits.show', ['id' => $unidade->id]) }}">VER DETALHES</a>
+                </div>
+            </div>
+        </div>
+        @endforeach
+        @else
+            <div class="col-12">
+                <p class="text-muted text-center">Nenhuma unidade encontrada.</p>
+            </div>
+        @endif
+    </div>
+</div>
+
+<script type="text/javascript">
+    $.ajaxSetup({ headers: { 'csrftoken': '{{ csrf_token() }}' } });
+
+    function carregarKits() {
+        $.ajax({
+            type: "get",
+            url: "{{ route('kits.index') }}",
+            data: { 'search': $('#search').val().trim(), 'sort': $('#sort').val() },
+            success: function(data) { $('.mycard').html(data); },
+            error: function(xhr, status, error) { console.error('Erro na requisição Ajax:', status, error); }
+        });
+    }
+
+    $('#search').on('keyup', carregarKits);
+    $('#sort').on('change', carregarKits);
+</script>
+@endsection

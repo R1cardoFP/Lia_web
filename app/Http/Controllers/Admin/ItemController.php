@@ -1,0 +1,838 @@
+<?php
+
+namespace App\Http\Controllers\Admin;
+
+use App\Http\Controllers\Controller;
+use App\Models\Item;
+use App\Models\Kit;
+use App\Models\ItemCategorie;
+use App\Models\ItemReserve;
+use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
+use Illuminate\Support\Facades\Auth;
+use App\Models\ItemUnity;
+
+class ItemController extends Controller
+{
+    
+    public function index(Request $request)
+    {
+        if (Auth::user()->user_type_id != 1 && Auth::user()->user_type_id != 2) {
+            return redirect('/');
+        }
+
+        $search = $request->get('search');
+        $sort   = $request->get('sort', 'nome'); // 'nome' | 'lia'
+
+        // Junta a tabela 'item' para poder ordenar/pesquisar pelo nome do item
+        $query = ItemUnity::with('item')
+            ->where('item_unity.item_unity_state_id', 1)
+            ->join('item', 'item_unity.item_id', '=', 'item.id')
+            ->select('item_unity.*');
+
+        if (!empty($search)) {
+            $query->where(function ($q) use ($search) {
+                $q->where('item_unity.lia_code', 'LIKE', '%' . $search . '%')
+                  ->orWhere('item.nome', 'LIKE', '%' . $search . '%')
+                  ->orWhere('item.model', 'LIKE', '%' . $search . '%');
+            });
+        }
+
+        // Ordenação
+        if ($sort === 'lia') {
+            $query->orderBy('item_unity.lia_code');
+        } else {
+            $query->orderBy('item.nome')->orderBy('item_unity.lia_code');
+        }
+
+        $unidades = $query->get();
+
+        if ($request->ajax()) {
+            $output = '';
+            if ($unidades->count() > 0) {
+                foreach ($unidades as $unidade) {
+                    if (!$unidade->item) continue;
+                    $output .= '<div class="col-sm-3 mb-4">
+                                    <div class="card h-100">
+                                        <div class="card-body d-flex flex-column justify-content-center text-center">
+                                            <h1 class="card-title">' . htmlspecialchars($unidade->item->nome, ENT_QUOTES, 'UTF-8') . '</h1>
+                                            <small class="text-muted mb-2">Ref: ' . htmlspecialchars($unidade->ipvc_ref, ENT_QUOTES, 'UTF-8') . '</small>
+                                            <p class="text-muted mb-2">LIA: ' . htmlspecialchars($unidade->lia_code, ENT_QUOTES, 'UTF-8') . '</p>
+                                            <p class="card-text card-text-preco">' . number_format($unidade->item->price_day, 2, ',', '.') . ' € / dia</p>
+                                            <a class="btn btn-primary mx-auto" style="width: 140px;" href="' . route('itens.show', ['id' => $unidade->id]) . '">VER DETALHES</a>
+                                        </div>
+                                    </div>
+                                </div>';
+                }
+            } else {
+                $output = '<div class="col-12"><p class="text-muted text-center">Nenhuma unidade encontrada.</p></div>';
+            }
+            return response()->json($output);
+        }
+
+        return view('admin.itemUnities.index', ['unidades' => $unidades]);
+    }
+
+    
+
+    public function show($id)
+    {
+        if (Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2) {
+           
+            //$unidade = ItemUnity::with(['item', 'itemUnityState'])->find($id);
+            $unidade = ItemUnity::with(['item.itemCategorie', 'itemUnityState'])->find($id);
+            if (!$unidade) {
+                return redirect()->route('itens.index')->with('toast_error', 'Unidade não encontrada.');
+            }
+
+            $unidadesDoItem = ItemUnity::where('item_id', $unidade->item_id)->get();
+
+            return view('admin.itemUnities.show', [
+                'unidade'   => $unidade,
+                'item'      => $unidade->item, 
+                'unidadesDoItem' => $unidadesDoItem
+            ]);
+        }
+        return redirect('/');
+    }
+
+
+    public function updateUnity(Request $request, $id)
+    {
+        if (Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2) {
+            
+            $request->validate([
+                'lia_code' => 'required|string|unique:item_unity,lia_code,' . $id,
+                'item_unity_state_id' => 'required|exists:item_unity_states,id',
+                'data_aquisicao' => 'nullable|date|before_or_equal:today',
+                'ipvc_ref'            => 'nullable|string|max:190|unique:item_unity,ipvc_ref,' . $id,
+                'serial_number'       => 'nullable|string|max:190|unique:item_unity,serial_number,' . $id,
+            ], [
+                'lia_code.required' => 'O código LIA não pode ficar vazio.',
+                'lia_code.unique' => 'Este código LIA já está a ser usado noutra unidade.',
+                'data_aquisicao.date' => 'O formato da data de aquisição é inválido.',
+                'data_aquisicao.before_or_equal' => 'A data de aquisição não pode ser uma data futura.',
+                'ipvc_ref.unique'                 => 'Esta referência IPVC já está a ser usada noutra unidade.',
+                'ipvc_ref.max'                    => 'A referência IPVC não pode ultrapassar os 190 caracteres.',
+                'serial_number.unique'            => 'Este número de série já está a ser usado noutra unidade.',
+                'serial_number.max'               => 'O número de série não pode ultrapassar os 190 caracteres.',
+            ]);
+
+            $unidade = ItemUnity::with('kitUnity.kit')->find($id);
+            
+            if ($unidade) {
+                // 1. Atualiza a peça individual
+                $unidade->update($request->only(['lia_code', 'item_unity_state_id', 'data_aquisicao', 'ipvc_ref', 
+                'serial_number','observacoes']));
+
+                // 2. NOVA LÓGICA DE SINCRONIZAÇÃO COM A MALA (KIT)
+                if ($unidade->kit_unity_id) {
+                    
+                    // CENÁRIO A: A peça avariou ou ficou indisponível (!= 1)
+                    if ($unidade->item_unity_state_id != 1) {
+                        
+                        // Passamos a mala para 2 (Oculta/Indisponível) para não dar erro de Foreign Key
+                        \App\Models\KitUnity::where('id', $unidade->kit_unity_id)->update([
+                            'kit_unity_state_id' => 2
+                        ]);
+                        
+                        return redirect()->route('itens.show', $id)->with('toast_warning', 'Unidade atualizada! A mala associada passou a Indisponível/Oculta.');
+
+                    } 
+                    // CENÁRIO B e C: A peça foi arranjada (== 1)
+                    else {
+                        $outrasPecasAvariadas = \App\Models\ItemUnity::where('kit_unity_id', $unidade->kit_unity_id)
+                                                    ->where('item_unity_state_id', '!=', 1)
+                                                    ->exists();
+                        
+                        // CENÁRIO B: Não há mais avarias. A mala fica curada!
+                        if (!$outrasPecasAvariadas) {
+                            \App\Models\KitUnity::where('id', $unidade->kit_unity_id)->update([
+                                'kit_unity_state_id' => 1
+                            ]);
+                            return redirect()->route('itens.show', $id)->with('toast_success', 'Unidade atualizada! A mala associada voltou a ficar Disponível.');
+                        } 
+                        // CENÁRIO C: Esta peça ficou boa, mas a mala tem mais peças avariadas.
+                        else {
+                            return redirect()->route('itens.show', $id)->with('toast_info', 'Unidade atualizada, mas a mala continua Indisponível (tem outras peças em manutenção).');
+                        }
+                    }
+                }
+
+                // CENÁRIO D: A peça não pertence a nenhuma mala (Item solto)
+                return redirect()->route('itens.show', $id)->with('toast_success', 'Unidade individual atualizada com sucesso!');
+            }
+
+            return redirect()->back()->with('toast_error', 'Unidade não encontrada.');
+        }
+        return redirect('/');
+    }
+
+
+    public function anularUnity($id)
+    {
+        if (Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2) {
+            
+            $unidade = ItemUnity::find($id);
+
+            
+
+            if (!$unidade) {
+                return redirect()->back()->with('toast_error', 'Unidade não encontrada.');
+            }
+
+            if ($unidade->item_unity_state_id == 3) {
+            return redirect()->route('itens.index')->with('toast_error', 'Esta unidade já se encontra anulada.');
+            }
+
+           
+            \Illuminate\Support\Facades\DB::transaction(function () use ($unidade) {
+               
+                $unidade->update([
+                    'item_unity_state_id' => 3 
+                ]);
+
+                if ($unidade->kitUnity) {
+                if ($unidade->kitUnity->kit_unity_state_id != 2) {
+                    $unidade->kitUnity->update([
+                        'kit_unity_state_id' => 2
+                    ]);
+                }
+            }
+
+                $item = $unidade->item;
+                if ($item) {
+                    $item->decrement('quantity', 1);
+                }
+            });
+
+            return redirect()->route('itens.index')->with('toast_success', 'Unidade anulada e stock atualizado com sucesso!');
+        }
+        return redirect('/');
+    }
+
+
+
+    public function create()
+    {
+        if (Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2) {
+            return view('admin.itens.create', [
+                'categorias' => ItemCategorie::all(),
+            ]);
+        }
+        return redirect('/');
+    }
+
+
+
+    public function store(Request $request)
+    {
+        if(Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2){
+            $request->validate(
+                [
+                    'nome' => 'required|string|max:190',
+                    'model' => 'required|string|max:190',
+                    'preco' => 'required|numeric|min:0',
+                    'price_day'     => 'required|numeric|min:0',
+                    'quantity'      => 'required|integer|min:1',
+                    'categoria_id'  => 'required|exists:item_categories,id',
+                    'image'        => 'nullable|image|mimes:jpeg,png,jpg,webp|max:2048',
+                
+                
+                ],
+                [
+
+                    'nome.required'        => 'O item deve ter um nome.',
+                    'nome.string'          => 'O nome deve ser um texto válido.',
+                    'nome.max'             => 'O nome não pode ter mais de 190 caracteres.',
+
+                    // MODELO
+                    'model.required'       => 'O item deve ter um modelo.',
+                    'model.string'         => 'O modelo deve ser um texto válido.',
+                    'model.max'            => 'O modelo não pode ter mais de 190 caracteres.',
+
+                    
+
+                   
+
+                    // PREÇO
+                    'preco.required'       => 'O item deve ter um preço associado.',
+                    'preco.numeric'        => 'O preço deve ser um número válido.',
+                    'preco.min'            => 'O preço não pode ser inferior a 0 €.',
+
+                    // PREÇO POR DIA
+                    'price_day.required'   => 'O item deve ter um preço por dia associado.',
+                    'price_day.numeric'    => 'O preço por dia deve ser um número válido.',
+                    'price_day.min'        => 'O preço por dia não pode ser inferior a 0 €.',
+
+                    // QUANTIDADE
+                    'quantity.required'    => 'Insira a quantidade total.',
+                    'quantity.integer'     => 'A quantidade total deve ser um número inteiro.',
+                    'quantity.min'         => 'A quantidade total deve ser pelo menos 1.',
+
+                    // CATEGORIA
+                    'categoria_id.required' => 'Selecione uma categoria.',
+                    'categoria_id.exists'   => 'A categoria selecionada é inválida.', 
+
+                    // IMAGEM
+                    'image.image'          => 'O ficheiro selecionado deve ser uma imagem.',
+                    'image.mimes'          => 'A imagem deve ser do formato: jpeg, png, jpg ou webp.',
+                    'image.max'            => 'A imagem não pode ter mais de 2MB.',
+
+                    
+                ]
+            );
+
+            if ($request->image != null) {
+                $imagePath = $request->file('image');
+                $imageName = time() . '.' . $imagePath->getClientOriginalExtension();
+                $path = $request->file('image')->storeAs('images/itens', $imageName, 'public');
+            } else {
+                $path = "images/empty.png";
+            }
+
+               
+            $itemData = $request->only(['nome', 'model', 'observation', 'acessorio', 'preco', 'categoria_id', 'price_day', 'quantity']);
+            $itemData['image'] = $path; 
+
+            
+            return redirect()->route('itens.createUnities')->with([
+                'item_data' => $itemData,
+                'item_nome' => $request->nome,
+                'quantity'  => $request->quantity
+            ]);
+        }
+        return redirect('/');
+    }
+
+
+    public function createUnities()
+    {
+        if(Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2){
+
+            $itemData  = session('item_data');
+            $item_nome = session('item_nome');
+            $quantity  = session('quantity');
+
+            if (!$itemData || !$quantity || !$item_nome) {
+                return redirect()->route('itens.create')->with('toast_error', 'Por favor, preencha os dados do item primeiro.');
+            }
+
+            //session()->keep(['item_data', 'item_nome', 'quantity']);
+            
+            session()->flash('item_data', $itemData);
+            session()->flash('item_nome', $item_nome);
+            session()->flash('quantity', $quantity);
+
+            return view('admin.itemUnities.create', compact('item_nome', 'quantity'));
+        }
+        return redirect('/');
+    }
+
+
+    public function storeUnities(Request $request)
+    {
+        if(Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2){
+           
+
+        
+
+        session()->keep(['item_data', 'item_nome', 'quantity']);
+        $itemData = session('item_data');
+
+            if (!$itemData) {
+                return redirect()->route('itens.create')->with('toast_error', 'Sessão expirada. Volte a preencher os dados do item.');
+            }
+
+    
+            $request->validate([
+                'lia_codes'  => 'required|array',
+                'lia_codes.*'=> 'required|string|distinct|unique:item_unity,lia_code',
+                'ipvc_ref'           => 'nullable|array',
+                'ipvc_ref.*'         => 'nullable|string|distinct|unique:item_unity,ipvc_ref|max:190',
+                'serial_number'      => 'nullable|array',
+                'serial_number.*'    => 'nullable|string|distinct|unique:item_unity,serial_number|max:190',
+                'data_aquisicao' => 'array',
+                'data_aquisicao.*'   => 'nullable|date|before_or_equal:today',
+                
+            ], [
+                'lia_codes.*.required' => 'O código LIA é obrigatório.',
+                'lia_codes.*.unique'   => 'Este código LIA já existe no sistema.',
+                'lia_codes.*.distinct' => 'Inseriu códigos LIA duplicados.',
+                'data_aquisicao.*.date'       => 'Insira uma data válida.',
+                'data_aquisicao.*.before_or_equal' => 'A data de aquisição não pode ser no futuro.',
+               
+                'serial_number.*.string'       => 'O número de série deve ser um texto válido.',
+                'serial_number.*.max'          => 'O número de série não pode ter mais de 190 caracteres.',
+                'serial_number.*.unique'       => 'Este número de série já está registado.',
+                'serial_number.*.distinct'     => 'Inseriu números de série duplicados no formulário.',
+                
+                
+                'ipvc_ref.*.string'            => 'A referência IPVC deve ser um texto válido.',
+                'ipvc_ref.*.max'               => 'A referência IPVC não pode ter mais de 190 caracteres.',
+                'ipvc_ref.*.unique'            => 'Esta referência IPVC já está registada.',
+                'ipvc_ref.*.distinct'          => 'Inseriu referências IPVC duplicadas no formulário.',
+
+            ]);
+
+            
+            \Illuminate\Support\Facades\DB::transaction(function () use ($itemData, $request) {
+                
+               
+                $item = Item::create($itemData);
+
+                
+                foreach ($request->lia_codes as $index => $code) {
+                    ItemUnity::create([
+                        'lia_code'            => $code,
+                        'data_aquisicao'      => $request->data_aquisicao[$index] ?? null,
+                        //'data_aquisicao'      => $request->data_aquisicao,
+                        'item_id'             => $item->id,
+                        'kit_unity_id'        => null,
+                        'item_unity_state_id' => 1,
+                        'serial_number'       => $request->serial_number[$index] ?? null,
+                        'ipvc_ref'            => $request->ipvc_ref[$index] ?? null,
+                    ]);
+                }
+            });
+
+            return redirect('admin/item-unities')->with('toast_success', 'Item criado com sucesso!');
+        }
+        return redirect('/');
+    }
+
+
+
+    public function ocultos(Request $request)
+{
+        if (Auth::user()->user_type_id != 1 && Auth::user()->user_type_id != 2) {
+            return redirect('/');
+        }
+
+        $search = $request->get('search');
+        $sort   = $request->get('sort', 'nome');
+
+        $query = ItemUnity::with('item')
+            ->where('item_unity.item_unity_state_id', 2)
+            ->join('item', 'item_unity.item_id', '=', 'item.id')
+            ->select('item_unity.*');
+
+        if (!empty($search)) {
+            $query->where(function ($q) use ($search) {
+                $q->where('item_unity.lia_code', 'LIKE', '%' . $search . '%')
+                  ->orWhere('item.nome', 'LIKE', '%' . $search . '%')
+                  ->orWhere('item.model', 'LIKE', '%' . $search . '%');
+            });
+        }
+
+        if ($sort === 'lia') {
+            $query->orderBy('item_unity.lia_code');
+        } else {
+            $query->orderBy('item.nome')->orderBy('item_unity.lia_code');
+        }
+
+        $unidades = $query->get();
+
+        if ($request->ajax()) {
+            $output = '';
+            if ($unidades->count() > 0) {
+                foreach ($unidades as $unidade) {
+                    if (!$unidade->item) continue;
+                    $output .= '<div class="col-sm-3 mb-4">
+                                    <div class="card h-100">
+                                        <div class="card-body d-flex flex-column justify-content-center text-center">
+                                            <h1 class="card-title">' . htmlspecialchars($unidade->item->nome, ENT_QUOTES, 'UTF-8') . '</h1>
+                                            <small class="text-muted mb-2">Ref: ' . htmlspecialchars($unidade->ipvc_ref, ENT_QUOTES, 'UTF-8') . '</small>
+                                            <p class="text-muted mb-2">LIA: ' . htmlspecialchars($unidade->lia_code, ENT_QUOTES, 'UTF-8') . '</p>
+                                            <p class="card-text card-text-preco">' . number_format($unidade->item->price_day, 2, ',', '.') . ' € / dia</p>
+                                            <a class="btn btn-primary mx-auto" style="width: 140px;" href="' . route('itens.show', ['id' => $unidade->id]) . '">VER DETALHES</a>
+                                        </div>
+                                    </div>
+                                </div>';
+                }
+            } else {
+                $output = '<div class="col-12"><p class="text-muted text-center">Nenhuma unidade oculta encontrada.</p></div>';
+            }
+            return response()->json($output);
+        }
+
+        return view('admin.itemUnities.ocultos', ['unidades' => $unidades]);
+}
+
+
+    public function edit($id)
+    {
+        if (Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2) {
+            
+            $item = Item::find($id);
+            $categorias = ItemCategorie::all();
+
+            if (!$item) {
+                return redirect()->route('itens.index')->with('toast_error', 'Item não encontrado.');
+            }
+
+            return view('admin.itens.edit', compact('item', 'categorias'));
+        }
+        return redirect('/');
+    }
+
+
+
+public function update(Request $request, $id)
+{
+    if (Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2) {
+        
+        $item = Item::find($id);
+        if (!$item) {
+            return redirect()->route('itens.index')->with('toast_error', 'Item não encontrado.');
+        }
+
+        $request->validate([
+            'nome'         => 'required|string|max:190',
+            'model'        => 'required|string|max:190',
+            'preco'        => 'required|numeric|min:0',
+            'price_day'    => 'required|numeric|min:0',
+            'quantity'     => 'required|integer|min:' . $item->quantity,
+            'categoria_id' => 'required|exists:item_categories,id',
+            'image'        => 'nullable|image|mimes:jpeg,png,jpg,webp|max:2048',
+
+            
+        ], [
+    
+                    'nome.required'        => 'O item deve ter um nome.',
+                    'nome.string'          => 'O nome deve ser um texto válido.',
+                    'nome.max'             => 'O nome não pode ter mais de 190 caracteres.',
+
+                    // MODELO
+                    'model.required'       => 'O item deve ter um modelo.',
+                    'model.string'         => 'O modelo deve ser um texto válido.',
+                    'model.max'            => 'O modelo não pode ter mais de 190 caracteres.',
+
+                    // PREÇO
+                    'preco.required'       => 'O item deve ter um preço associado.',
+                    'preco.numeric'        => 'O preço deve ser um número válido.',
+                    'preco.min'            => 'O preço não pode ser inferior a 0 €.',
+
+                    // PREÇO POR DIA
+                    'price_day.required'   => 'O item deve ter um preço por dia associado.',
+                    'price_day.numeric'    => 'O preço por dia deve ser um número válido.',
+                    'price_day.min'        => 'O preço por dia não pode ser inferior a 0 €.',
+
+                    // QUANTIDADE
+                    'quantity.required'    => 'Insira a quantidade total.',
+                    'quantity.integer'     => 'A quantidade total deve ser um número inteiro.',
+                    'quantity.min'         => 'A quantidade não pode ser inferior à quantidade atual (' . $item->quantity . ').',
+
+                    // CATEGORIA
+                    'categoria_id.required' => 'Selecione uma categoria.',
+                    'categoria_id.exists'   => 'A categoria selecionada é inválida.', 
+
+                    // IMAGEM
+                    'image.image'          => 'O ficheiro selecionado deve ser uma imagem.',
+                    'image.mimes'          => 'A imagem deve ser do formato: jpeg, png, jpg ou webp.',
+                    'image.max'            => 'A imagem não pode ter mais de 2MB.',
+
+        ]);
+        
+
+        $path = $item->image;
+        if ($request->hasFile('image')) {
+            $imagePath = $request->file('image');
+            $imageName = time() . '.' . $imagePath->getClientOriginalExtension();
+            $path = $request->file('image')->storeAs('images/itens', $imageName, 'public');
+        }
+
+        $dadosItem = $request->except(['image']);
+        $dadosItem['image'] = $path; 
+        
+        
+        session(['dados_item_edicao' => $dadosItem]);
+
+        
+        return redirect()->route('itens.createUnitiesEtapa', $item->id);
+    }
+    return redirect('/');
+}
+
+
+public function showUnitiesEtapa($id)
+{
+    if (Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2) {
+        $item = Item::find($id);
+        $dadosItem = session('dados_item_edicao');
+
+        if (!$item || !$dadosItem) {
+            return redirect()->route('itens.edit', $id)->with('toast_error', 'Sessão expirada ou item inválido.');
+        }
+
+        $unidadesAtuais = ItemUnity::where('item_id', $item->id)
+                                    ->whereIn('item_unity_state_id', [1, 2, 4])
+                                    ->get();
+        
+        $novasUnidadesQtd = $dadosItem['quantity'] - $unidadesAtuais->count();
+
+        return view('admin.itemUnities.edit', [
+            'item' => $item,
+            'unidadesAtuais' => $unidadesAtuais,
+            'novasUnidadesQtd' => $novasUnidadesQtd
+        ]);
+    }
+    return redirect('/');
+}
+
+public function updateUnitiesEtapa(Request $request, $id)
+{
+        if (Auth::user()->user_type_id == 1 || Auth::user()->user_type_id == 2) {
+            $item = Item::find($id);
+
+           
+            $request->validate([
+                'lias_atuais'              => 'required|array',
+               
+                'lias_atuais.*'            => 'required|string|distinct',
+                'data_aquisicao_atuais'    => 'array',
+                'data_aquisicao_atuais.*'  => 'nullable|date|before_or_equal:today',
+                
+                'novos_lias'               => 'sometimes|array',
+               
+                'novos_lias.*'             => 'required|string|distinct|unique:item_unity,lia_code',
+                'data_aquisicao_novas'     => 'sometimes|array',
+                'data_aquisicao_novas.*'   => 'nullable|date|before_or_equal:today',
+
+
+                'ipvc_ref_atuais'        => 'nullable|array',
+                'ipvc_ref_atuais.*'      => 'nullable|string|distinct|max:190',
+                'serial_number_atuais'   => 'nullable|array',
+                'serial_number_atuais.*' => 'nullable|string|distinct|max:190',
+
+                'ipvc_ref_novas'         => 'nullable|array',
+                'ipvc_ref_novas.*'       => 'nullable|string|distinct|unique:item_unity,ipvc_ref|max:190',
+                'serial_number_novas'    => 'nullable|array',
+                'serial_number_novas.*'  => 'nullable|string|distinct|unique:item_unity,serial_number|max:190',
+
+                
+            ], [
+                'lias_atuais.*.required'             => 'O código LIA não pode ficar vazio.',
+                'lias_atuais.*.distinct'             => 'Inseriu códigos LIA duplicados entre as unidades atuais.',
+                'data_aquisicao_atuais.*.date'       => 'Insira uma data de aquisição válida.',
+                'data_aquisicao_atuais.*.before_or_equal' => 'A data de aquisição não pode ser no futuro.',
+                'novos_lias.*.required'              => 'Deves preencher o código LIA para as novas unidades.',
+                'novos_lias.*.unique'                => 'Este código LIA já existe no sistema.',
+                'novos_lias.*.distinct'              => 'Inseriu códigos LIA duplicados entre as novas unidades.',
+                'data_aquisicao_novas.*.date'        => 'Insira uma data de aquisição válida.',
+                'data_aquisicao_novas.*.before_or_equal' => 'A data de aquisição não pode ser no futuro.',
+
+
+                'ipvc_ref_atuais.*.distinct'      => 'Inseriu referências IPVC duplicadas nas unidades atuais.',
+                'ipvc_ref_novas.*.distinct'       => 'Inseriu referências IPVC duplicadas nas novas unidades.',
+                'ipvc_ref_novas.*.unique'         => 'Esta referência IPVC já existe no sistema.',
+                'ipvc_ref_novas.*.max'            => 'A ref IPVC não pode passar os 190 caracteres.',
+
+                'serial_number_atuais.*.distinct' => 'Inseriu números de série duplicados nas unidades atuais.',
+                'serial_number_novas.*.distinct'  => 'Inseriu números de série duplicados nas novas unidades.',
+                'serial_number_novas.*.unique'    => 'Este número de série já existe no sistema.',
+                'serial_number_novas.*.max'       => 'O número de série não pode passar os 190 caracteres.',
+            ]);
+
+
+
+                        if ($request->has('novos_lias')) {
+                foreach ($request->novos_lias as $novoLia) {
+                    if (in_array($novoLia, $request->lias_atuais)) {
+                        return redirect()->back()
+                            ->withInput()
+                            ->withErrors(['novos_lias' => 'Inseriu códigos LIA duplicados.']);
+                    }
+                }
+            }
+
+
+            if ($request->has('ipvc_ref_novas') && $request->has('ipvc_ref_atuais')) {
+                foreach ($request->ipvc_ref_novas as $novoIpvc) {
+                    if (!empty($novoIpvc) && in_array($novoIpvc, $request->ipvc_ref_atuais)) {
+                        return redirect()->back()->withInput()->withErrors(['ipvc_ref_novas' => 'Inseriu referências IPVC duplicadas entre as unidades novas e atuais.']);
+                    }
+                }
+            }
+
+            // Validar Serial Number (Ignorando nulls)
+            if ($request->has('serial_number_novas') && $request->has('serial_number_atuais')) {
+                foreach ($request->serial_number_novas as $novoSerial) {
+                    if (!empty($novoSerial) && in_array($novoSerial, $request->serial_number_atuais)) {
+                        return redirect()->back()->withInput()->withErrors(['serial_number_novas' => 'Inseriu números de série duplicados entre as unidades novas e atuais.']);
+                    }
+                }
+            }
+                
+           if ($request->has('lias_atuais')) {
+        foreach ($request->lias_atuais as $unityId => $liaCode) {
+            
+            // Validar LIA na BD
+            $existeLia = \App\Models\ItemUnity::where('lia_code', $liaCode)->where('id', '!=', $unityId)->exists();
+            if ($existeLia) {
+                return redirect()->back()->withInput()->withErrors(['lias_atuais.'.$unityId => 'Este código LIA já está registado noutro item do sistema.']);
+            }
+
+            // Validar IPVC REF na BD
+            $ipvcRef = $request->ipvc_ref_atuais[$unityId] ?? null;
+            if (!empty($ipvcRef)) {
+                $existeIpvc = \App\Models\ItemUnity::where('ipvc_ref', $ipvcRef)->where('id', '!=', $unityId)->exists();
+                if ($existeIpvc) {
+                    return redirect()->back()->withInput()->withErrors(['ipvc_ref_atuais.'.$unityId => 'Esta ref IPVC já está registada noutro item do sistema.']);
+                }
+            }
+
+            // Validar Serial Number na BD
+            $serial = $request->serial_number_atuais[$unityId] ?? null;
+            if (!empty($serial)) {
+                $existeSerial = \App\Models\ItemUnity::where('serial_number', $serial)->where('id', '!=', $unityId)->exists();
+                if ($existeSerial) {
+                    return redirect()->back()->withInput()->withErrors(['serial_number_atuais.'.$unityId => 'Este número de série já está registado noutro item do sistema.']);
+                }
+            }
+        }
+    }
+
+    // 4. VERIFICAÇÃO ADICIONAL: NOVOS IPVC/SERIAL NA BD (Evita duplicados ao criar novos)
+    if ($request->has('ipvc_ref_novas')) {
+        foreach ($request->ipvc_ref_novas as $index => $novoIpvc) {
+            if (!empty($novoIpvc)) {
+                $existeIpvcNovo = \App\Models\ItemUnity::where('ipvc_ref', $novoIpvc)->exists();
+                if ($existeIpvcNovo) {
+                    return redirect()->back()->withInput()->withErrors(['ipvc_ref_novas.'.$index => 'Esta nova ref IPVC já existe no sistema.']);
+                }
+            }
+        }
+    }
+
+    if ($request->has('serial_number_novas')) {
+        foreach ($request->serial_number_novas as $index => $novoSerial) {
+            if (!empty($novoSerial)) {
+                $existeSerialNovo = \App\Models\ItemUnity::where('serial_number', $novoSerial)->exists();
+                if ($existeSerialNovo) {
+                    return redirect()->back()->withInput()->withErrors(['serial_number_novas.'.$index => 'Este novo número de série já existe no sistema.']);
+                }
+            }
+        }
+    }
+
+
+           
+            $dadosItem = session('dados_item_edicao');
+
+            if (!$dadosItem) {
+                return redirect()->route('itens.edit', $id)->with('toast_error', 'Sessão expirada. Por favor tente novamente.');
+            }
+
+            
+            $item->update([
+                'nome' => $dadosItem['nome'],
+                'model' => $dadosItem['model'],
+                'preco' => $dadosItem['preco'],
+                'price_day' => $dadosItem['price_day'] ?? null,
+                'quantity' => $dadosItem['quantity'],
+                'observation' => $dadosItem['observation'] ?? null,
+                'acessorio' => $dadosItem['acessorio'] ?? null,
+                'image' => $dadosItem['image'],
+                'categoria_id' => $dadosItem['categoria_id']
+            ]);
+
+
+            if ($request->has('lias_atuais')) {
+            foreach ($request->lias_atuais as $unityId => $liaCode) {
+                $unity = ItemUnity::find($unityId);
+                if ($unity) {
+                    $unity->update([
+                        'lia_code'       => $liaCode,
+                        'data_aquisicao' => $request->data_aquisicao_atuais[$unityId] ?? null,
+                        'ipvc_ref'       => $request->ipvc_ref_atuais[$unityId] ?? null,
+                        'serial_number'  => $request->serial_number_atuais[$unityId] ?? null
+                    ]);
+                }
+            }
+        }
+
+        
+        if ($request->has('novos_lias')) {
+            foreach ($request->novos_lias as $index => $novoLia) {
+                ItemUnity::create([
+                    'item_id'             => $item->id,
+                    'lia_code'            => $novoLia,
+                    'data_aquisicao'      => $request->data_aquisicao_novas[$index] ?? null, 
+                    'ipvc_ref'            => $request->ipvc_ref_novas[$index] ?? null,
+                    'serial_number'       => $request->serial_number_novas[$index] ?? null,
+                    'item_unity_state_id' => 1 
+                ]);
+            }
+        }
+           
+            
+            session()->forget('dados_item_edicao');
+
+            return redirect()->route('itens.index')->with('toast_success', 'Item e unidades gravados com sucesso!');
+        }
+
+        return redirect('/');
+}
+
+
+public function manutencao(Request $request)
+{
+        if (Auth::user()->user_type_id != 1 && Auth::user()->user_type_id != 2) {
+            return redirect('/');
+        }
+
+        $search = $request->get('search');
+        $sort   = $request->get('sort', 'nome');
+
+        $query = ItemUnity::with('item')
+            ->where('item_unity.item_unity_state_id', 4)
+            ->join('item', 'item_unity.item_id', '=', 'item.id')
+            ->select('item_unity.*');
+
+        if (!empty($search)) {
+            $query->where(function ($q) use ($search) {
+                $q->where('item_unity.lia_code', 'LIKE', '%' . $search . '%')
+                  ->orWhere('item.nome', 'LIKE', '%' . $search . '%')
+                  ->orWhere('item.model', 'LIKE', '%' . $search . '%');
+            });
+        }
+
+        if ($sort === 'lia') {
+            $query->orderBy('item_unity.lia_code');
+        } else {
+            $query->orderBy('item.nome')->orderBy('item_unity.lia_code');
+        }
+
+        $unidades = $query->get();
+
+        if ($request->ajax()) {
+            $output = '';
+            if ($unidades->count() > 0) {
+                foreach ($unidades as $unidade) {
+                    if (!$unidade->item) continue;
+                    $output .= '<div class="col-sm-3 mb-4">
+                                    <div class="card h-100">
+                                        <div class="card-body d-flex flex-column justify-content-center text-center">
+                                            <h1 class="card-title">' . htmlspecialchars($unidade->item->nome, ENT_QUOTES, 'UTF-8') . '</h1>
+                                            <small class="text-muted mb-2">Ref: ' . htmlspecialchars($unidade->ipvc_ref, ENT_QUOTES, 'UTF-8') . '</small>
+                                            <p class="text-muted mb-2">LIA: ' . htmlspecialchars($unidade->lia_code, ENT_QUOTES, 'UTF-8') . '</p>
+                                            <p class="card-text card-text-preco">' . number_format($unidade->item->price_day, 2, ',', '.') . ' € / dia</p>
+                                            <a class="btn btn-primary mx-auto" style="width: 140px;" href="' . route('itens.show', ['id' => $unidade->id]) . '">VER DETALHES</a>
+                                        </div>
+                                    </div>
+                                </div>';
+                }
+            } else {
+                $output = '<div class="col-12"><p class="text-muted text-center">Nenhuma unidade em manutenção encontrada.</p></div>';
+            }
+            return response()->json($output);
+        }
+
+        return view('admin.itemUnities.manutencao', ['unidades' => $unidades]);
+}
+
+
+
+}
+

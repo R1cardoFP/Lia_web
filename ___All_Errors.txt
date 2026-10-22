@@ -1,0 +1,8 @@
+CorrelationId: a910b848-eb09-4d0a-b992-ed27725f8df8
+UTC DateTime: 10/08/2026 13:35:44
+
+The following files/folders have not been downloaded
+0. lia/public/images/itens
+1. lia/public/vendors/jszip/documentation/_layouts/default.html
+2. lia/public/vendors/select2/docs/_layouts/default.html
+3. lia/public/vendors/select2/docs/_layouts/home.html
