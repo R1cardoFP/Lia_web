@@ -6,6 +6,10 @@
 # Dependências (nunca subir as pastas de pacotes)
 /vendor
 /node_modules
+/node-api/node_modules
+/node-api/.env
+/node-api/.env.*
+!/node-api/.env.example
 
 # Ficheiros de Sistema e IDE
 .phpunit.result.cache
@@ -27,3 +31,9 @@ auth.json
 /public/build
 /public/hot
 /public/storage
+
+# Artefactos da API Node
+/node-api/dist
+/node-api/build
+/node-api/coverage
+/node-api/.nyc_output
