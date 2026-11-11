@@ -256,4 +256,112 @@ async function detalheItem(request, response) {
   }
 }
 
-module.exports = { catalogo, detalheItem };
+function dataComoTexto(valor) {
+  return valor instanceof Date
+    ? valor.toISOString().slice(0, 10)
+    : String(valor).slice(0, 10);
+}
+
+function adicionarOcupacao(diasOcupacao, reserva) {
+  const dataInicio = dataComoTexto(reserva.start_date);
+  const dataFim = dataComoTexto(reserva.end_date);
+  const continua = reserva.ciclica_id === null || Number(reserva.ciclica_id) === 1;
+
+  for (let data = dataInicio; data <= dataFim; data = adicionarDia(data)) {
+    const diaSemana = new Date(`${data}T00:00:00Z`).getUTCDay();
+    if (!continua && diaSemana !== Number(reserva.ciclica_id) - 2) continue;
+    diasOcupacao[data] = (diasOcupacao[data] || 0) + Number(reserva.quantity);
+  }
+}
+
+async function datasEsgotadas(request, response) {
+  try {
+    const id = request.params.id;
+    const tipo = request.query.tipo;
+    const estadosBloqueantes = [1, 2, 4, 7];
+    let totalFisico = 0;
+    let reservas = [];
+    let encontrado = false;
+
+    if (tipo !== 'kit') {
+      const [itens] = await pool.query(
+        `SELECT i.id, COUNT(iu.id) AS item_unities_count
+           FROM item i
+           LEFT JOIN item_unity iu
+             ON iu.item_id = i.id AND iu.item_unity_state_id = ?
+          WHERE i.id = ?
+          GROUP BY i.id`,
+        [1, id],
+      );
+
+      if (itens[0]) {
+        encontrado = true;
+        totalFisico = Number(itens[0].item_unities_count);
+        [reservas] = await pool.query(
+          `SELECT r.start_date, r.end_date, pivot.quantity, r.ciclica_id
+             FROM item_reserve pivot
+             INNER JOIN reserves r ON pivot.reserve_id = r.id
+            WHERE pivot.item_id = ?
+              AND r.reserve_state_id IN (?, ?, ?, ?)
+              AND r.end_date >= CURDATE()`,
+          [id, ...estadosBloqueantes],
+        );
+      }
+    }
+
+    if (!encontrado && (tipo === 'kit' || tipo === undefined)) {
+      const [kits] = await pool.query(
+        `SELECT k.id, COUNT(ku.id) AS kit_unities_count
+           FROM kits k
+           LEFT JOIN kit_unity ku
+             ON ku.kit_id = k.id AND ku.kit_unity_state_id = ?
+          WHERE k.id = ?
+          GROUP BY k.id`,
+        [1, id],
+      );
+
+      if (kits[0]) {
+        encontrado = true;
+        totalFisico = Number(kits[0].kit_unities_count);
+        [reservas] = await pool.query(
+          `SELECT r.start_date, r.end_date, pivot.quantity, r.ciclica_id
+             FROM kit_reserve pivot
+             INNER JOIN reserves r ON pivot.reserve_id = r.id
+            WHERE pivot.kit_id = ?
+              AND r.reserve_state_id IN (?, ?, ?, ?)
+              AND r.end_date >= CURDATE()`,
+          [id, ...estadosBloqueantes],
+        );
+      }
+    }
+
+    if (!encontrado) {
+      return response.status(404).json({
+        status: 'error',
+        message: 'Equipamento não encontrado.',
+      });
+    }
+
+    const diasOcupacao = {};
+    reservas.forEach((reserva) => adicionarOcupacao(diasOcupacao, reserva));
+    const dias = Object.fromEntries(
+      Object.entries(diasOcupacao).map(([data, ocupado]) => [
+        data,
+        { ocupado, esgotado: ocupado >= totalFisico },
+      ]),
+    );
+
+    return response.status(200).json({
+      status: 'success',
+      data: { total: totalFisico, dias },
+    });
+  } catch (error) {
+    console.error(error);
+    return response.status(500).json({
+      status: 'error',
+      message: `Erro ao calcular datas: ${error.message}`,
+    });
+  }
+}
+
+module.exports = { catalogo, detalheItem, datasEsgotadas };
