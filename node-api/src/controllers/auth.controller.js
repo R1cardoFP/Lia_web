@@ -50,4 +50,24 @@ async function login(request, response) {
   }
 }
 
-module.exports = { login };
+async function me(request, response) {
+  return response.status(200).json(request.user);
+}
+
+async function logout(request, response) {
+  try {
+    await pool.query('DELETE FROM personal_access_tokens WHERE id = ?', [request.tokenId]);
+    return response.status(200).json({
+      status: 'success',
+      message: 'Sessão terminada com sucesso.',
+    });
+  } catch (error) {
+    console.error(error);
+    return response.status(500).json({
+      status: 'error',
+      message: 'Erro ao terminar sessão.',
+    });
+  }
+}
+
+module.exports = { login, me, logout };
