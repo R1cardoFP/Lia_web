@@ -3,6 +3,7 @@ const { createHash, randomBytes } = require('node:crypto');
 const pool = require('../config/database.config');
 
 async function register(request, response) {
+  // Valida os campos obrigatórios do registo
   const { name, email, password, phone, student_number: numeroAluno } = request.body ?? {};
   const telefone = phone != null ? String(phone) : '';
   const errors = {
@@ -25,6 +26,7 @@ async function register(request, response) {
   }
 
   try {
+    // Verifica se o email já está registado
     const [existentes] = await pool.query('SELECT id FROM users WHERE email = ? LIMIT 1', [email]);
     if (existentes.length > 0) {
       return response.status(422).json({
@@ -33,6 +35,7 @@ async function register(request, response) {
       });
     }
 
+    // Cria o utilizador e gera o token de acesso
     const passwordHash = await bcrypt.hash(password, 10);
     const [userResult] = await pool.query(
       `INSERT INTO users (name, email, password, phone, n_aluno, user_type_id, user_status_id, image, created_at, updated_at)
@@ -114,6 +117,7 @@ async function me(request, response) {
 
 async function logout(request, response) {
   try {
+    // Apaga o token usado no pedido atual
     await pool.query('DELETE FROM personal_access_tokens WHERE id = ?', [request.tokenId]);
     return response.status(200).json({
       status: 'success',
