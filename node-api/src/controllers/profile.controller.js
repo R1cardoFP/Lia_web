@@ -43,4 +43,52 @@ async function estatisticas(request, response) {
   }
 }
 
-module.exports = { estatisticas };
+async function atualizarPerfil(request, response) {
+  try {
+    const user = request.user;
+    const { name, phone, curso, n_aluno: numeroAluno } = request.body ?? {};
+
+    // Se o telemóvel for enviado, valida se tem exatamente 9 dígitos numéricos
+    if (phone !== undefined) {
+      const telefone = String(phone).trim();
+      if (!/^\d{9}$/.test(telefone)) {
+        return response.status(422).json({
+          status: 'error',
+          message: 'O número de telemóvel deve conter exatamente 9 dígitos.',
+        });
+      }
+    }
+
+    // Atualiza os dados mantendo os valores atuais quando o campo não é enviado
+    await pool.query(
+      `UPDATE users
+       SET name = ?, phone = ?, curso = ?, n_aluno = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [
+        name ?? user.name,
+        phone !== undefined ? String(phone).trim() : user.phone,
+        curso ?? user.curso,
+        numeroAluno ?? user.n_aluno,
+        user.id,
+      ],
+    );
+
+    // Obtém o utilizador atualizado sem a coluna password
+    const [[utilizador]] = await pool.query('SELECT * FROM users WHERE id = ? LIMIT 1', [user.id]);
+    const { password: _palavraPasse, ...utilizadorSemPalavraPasse } = utilizador;
+
+    return response.status(200).json({
+      status: 'success',
+      message: 'Perfil atualizado com sucesso!',
+      user: utilizadorSemPalavraPasse,
+    });
+  } catch (error) {
+    console.error(error);
+    return response.status(500).json({
+      status: 'error',
+      message: `Erro ao atualizar perfil: ${error.message}`,
+    });
+  }
+}
+
+module.exports = { estatisticas, atualizarPerfil };
