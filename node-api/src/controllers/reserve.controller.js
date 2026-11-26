@@ -410,4 +410,78 @@ async function getReservationHistory(request, response) {
   }
 }
 
-module.exports = { createReservation, getReservationHistory };
+async function getReservationDetails(request, response) {
+  try {
+    const [reservations] = await pool.query(
+      `SELECT r.id, r.reserve_state_id, r.description, r.start_date, r.end_date,
+              r.estimated_cost, r.is_paid, r.ciclica_id,
+              COALESCE(rs.description, 'Pendente') AS estado
+         FROM reserves r
+         LEFT JOIN reserve_states rs ON rs.id = r.reserve_state_id
+        WHERE r.id = ? AND r.user_id = ?
+        LIMIT 1`,
+      [request.params.id, request.user.id],
+    );
+    const reservation = reservations[0];
+    if (!reservation) {
+      return response.status(404).json({
+        status: 'error',
+        message: 'Reserva não encontrada ou erro ao carregar dados.',
+      });
+    }
+
+    const [items] = await pool.query(
+      `SELECT i.id, i.nome, i.model, i.image, i.price_day, ir.quantity
+         FROM item_reserve ir
+         LEFT JOIN item i ON i.id = ir.item_id
+        WHERE ir.reserve_id = ?`,
+      [reservation.id],
+    );
+    const [kits] = await pool.query(
+      `SELECT k.id, k.name, k.description, k.image, k.price_day, kr.quantity
+         FROM kit_reserve kr
+         LEFT JOIN kits k ON k.id = kr.kit_id
+        WHERE kr.reserve_id = ?`,
+      [reservation.id],
+    );
+
+    return response.status(200).json({
+      status: 'success',
+      data: {
+        id: reservation.id,
+        reserve_state_id: reservation.reserve_state_id,
+        description: reservation.description,
+        start_date: reservation.start_date,
+        end_date: reservation.end_date,
+        estimated_cost: reservation.estimated_cost,
+        is_paid: reservation.is_paid,
+        ciclica_id: reservation.ciclica_id,
+        estado: reservation.estado,
+        itens: items.filter((item) => item.id != null).map((item) => ({
+          id: item.id,
+          nome: item.nome ?? 'Equipamento Desconhecido',
+          model: item.model ?? 'N/A',
+          image: item.image ?? null,
+          quantidade: item.quantity ?? 1,
+          price_day: item.price_day ?? 0,
+        })),
+        kits: kits.filter((kit) => kit.id != null).map((kit) => ({
+          id: kit.id,
+          nome: kit.name ?? 'Kit Desconhecido',
+          description: kit.description ?? '',
+          image: kit.image ?? null,
+          quantidade: kit.quantity ?? 1,
+          price_day: kit.price_day ?? 0,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    return response.status(404).json({
+      status: 'error',
+      message: 'Reserva não encontrada ou erro ao carregar dados.',
+    });
+  }
+}
+
+module.exports = { createReservation, getReservationHistory, getReservationDetails };
