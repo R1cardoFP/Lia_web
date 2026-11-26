@@ -324,4 +324,90 @@ async function createReservation(request, response) {
   }
 }
 
-module.exports = { createReservation };
+async function getReservationHistory(request, response) {
+  try {
+    const [reservations] = await pool.query(
+      'SELECT * FROM reserves WHERE user_id = ? ORDER BY created_at DESC',
+      [request.user.id],
+    );
+    if (reservations.length === 0) {
+      return response.status(200).json({ status: 'success', data: [] });
+    }
+
+    const reservationIds = reservations.map((reservation) => reservation.id);
+    const placeholders = reservationIds.map(() => '?').join(', ');
+    const stateIds = [...new Set(reservations.map((reservation) => reservation.reserve_state_id))];
+    const [states] = await pool.query(
+      `SELECT * FROM reserve_states
+        WHERE id IN (${stateIds.map(() => '?').join(', ')})`,
+      stateIds,
+    );
+    const [itemReserves] = await pool.query(
+      `SELECT * FROM item_reserve
+        WHERE reserve_id IN (${placeholders})`,
+      reservationIds,
+    );
+    const [kitReserves] = await pool.query(
+      `SELECT * FROM kit_reserve
+        WHERE reserve_id IN (${placeholders})`,
+      reservationIds,
+    );
+
+    const itemIds = [...new Set(itemReserves.map((itemReserve) => itemReserve.item_id))];
+    const kitIds = [...new Set(kitReserves.map((kitReserve) => kitReserve.kit_id))];
+    const [items] = itemIds.length > 0
+      ? await pool.query(
+        `SELECT * FROM item WHERE id IN (${itemIds.map(() => '?').join(', ')})`,
+        itemIds,
+      )
+      : [[]];
+    const [kits] = kitIds.length > 0
+      ? await pool.query(
+        `SELECT * FROM kits WHERE id IN (${kitIds.map(() => '?').join(', ')})`,
+        kitIds,
+      )
+      : [[]];
+
+    const statesById = new Map(states.map((state) => [String(state.id), state]));
+    const itemsById = new Map(items.map((item) => [String(item.id), item]));
+    const kitsById = new Map(kits.map((kit) => [String(kit.id), kit]));
+    const itemReservesByReservation = new Map();
+    const kitReservesByReservation = new Map();
+
+    for (const itemReserve of itemReserves) {
+      const reservationKey = String(itemReserve.reserve_id);
+      const entries = itemReservesByReservation.get(reservationKey) ?? [];
+      entries.push({
+        ...itemReserve,
+        item: itemsById.get(String(itemReserve.item_id)) ?? null,
+      });
+      itemReservesByReservation.set(reservationKey, entries);
+    }
+    for (const kitReserve of kitReserves) {
+      const reservationKey = String(kitReserve.reserve_id);
+      const entries = kitReservesByReservation.get(reservationKey) ?? [];
+      entries.push({
+        ...kitReserve,
+        kit: kitsById.get(String(kitReserve.kit_id)) ?? null,
+      });
+      kitReservesByReservation.set(reservationKey, entries);
+    }
+
+    const data = reservations.map((reservation) => ({
+      ...reservation,
+      reserve_state: statesById.get(String(reservation.reserve_state_id)) ?? null,
+      item_reserves: itemReservesByReservation.get(String(reservation.id)) ?? [],
+      kit_reserves: kitReservesByReservation.get(String(reservation.id)) ?? [],
+    }));
+
+    return response.status(200).json({ status: 'success', data });
+  } catch (error) {
+    console.error(error);
+    return response.status(500).json({
+      status: 'error',
+      message: `Erro ao carregar o histórico: ${error.message}`,
+    });
+  }
+}
+
+module.exports = { createReservation, getReservationHistory };
