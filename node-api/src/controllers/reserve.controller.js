@@ -484,4 +484,74 @@ async function getReservationDetails(request, response) {
   }
 }
 
-module.exports = { createReservation, getReservationHistory, getReservationDetails };
+async function cancelReservation(request, response) {
+  let connection;
+  let transactionStarted = false;
+  async function reject(status, message) {
+    if (transactionStarted) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(rollbackError);
+      }
+      transactionStarted = false;
+    }
+    return response.status(status).json({ status: 'error', message });
+  }
+
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const [reservations] = await connection.query(
+      'SELECT id, user_id, reserve_state_id FROM reserves WHERE id = ? FOR UPDATE',
+      [request.params.id],
+    );
+    const reservation = reservations[0];
+    if (!reservation) {
+      return await reject(404, 'Reserva não encontrada.');
+    }
+    if (Number(reservation.user_id) !== Number(request.user.id)) {
+      return await reject(403, 'Não tens permissão para cancelar esta reserva.');
+    }
+    if (Number(reservation.reserve_state_id) !== 1) {
+      return await reject(400, 'Apenas reservas pendentes podem ser canceladas.');
+    }
+
+    await connection.query(
+      `UPDATE reserves
+          SET reserve_state_id = 10, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ? AND reserve_state_id = 1`,
+      [reservation.id, request.user.id],
+    );
+    await connection.commit();
+    transactionStarted = false;
+    return response.status(200).json({
+      status: 'success',
+      message: 'A reserva foi cancelada com sucesso.',
+    });
+  } catch (error) {
+    if (connection && transactionStarted) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(rollbackError);
+      }
+    }
+    console.error(error);
+    return response.status(500).json({
+      status: 'error',
+      message: `Erro ao tentar cancelar a reserva: ${error.message}`,
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+module.exports = {
+  createReservation,
+  getReservationHistory,
+  getReservationDetails,
+  cancelReservation,
+};
