@@ -1,4 +1,5 @@
 const pool = require('../config/database.config');
+const reservationNotificationService = require('../services/reservation-notification.service');
 
 const ESTADOS_RESERVA_BLOQUEANTES = [1, 2, 4, 7];
 
@@ -233,6 +234,7 @@ async function createReservation(request, response) {
 
   let connection;
   let transactionStarted = false;
+  let reservationId;
   async function reject(status, body) {
     if (transactionStarted) {
       try {
@@ -287,25 +289,22 @@ async function createReservation(request, response) {
         estimatedCost,
       ],
     );
+    reservationId = reserveResult.insertId;
 
     for (const kit of validated.kits) {
       await connection.query(
         'INSERT INTO kit_reserve (reserve_id, kit_id, quantity) VALUES (?, ?, ?)',
-        [reserveResult.insertId, kit.id, kit.quantity],
+        [reservationId, kit.id, kit.quantity],
       );
     }
     for (const item of validated.items) {
       await connection.query(
         'INSERT INTO item_reserve (reserve_id, item_id, quantity) VALUES (?, ?, ?)',
-        [reserveResult.insertId, item.id, item.quantity],
+        [reservationId, item.id, item.quantity],
       );
     }
     await connection.commit();
     transactionStarted = false;
-    return response.status(201).json({
-      status: 'success',
-      message: 'Reserva efetuada com sucesso!',
-    });
   } catch (error) {
     if (connection && transactionStarted) {
       try {
@@ -322,6 +321,27 @@ async function createReservation(request, response) {
   } finally {
     if (connection) connection.release();
   }
+
+  let notificationWarning;
+  try {
+    const notification = await reservationNotificationService.notifyManagersOfReservation({
+      reservationId,
+      description: validated.description,
+      requesterName: request.user.name,
+    });
+    if (notification.skipped) {
+      notificationWarning = 'Não existem gestores com email válido para notificar.';
+    }
+  } catch (error) {
+    console.error(`Reserva ${reservationId} criada, mas a notificação por email falhou: ${error.message}`);
+    notificationWarning = 'A reserva foi criada, mas não foi possível notificar os gestores por email.';
+  }
+
+  return response.status(201).json({
+    status: 'success',
+    message: 'Reserva efetuada com sucesso!',
+    ...(notificationWarning ? { warning: notificationWarning } : {}),
+  });
 }
 
 async function getReservationHistory(request, response) {
