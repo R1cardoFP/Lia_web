@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const pool = require('../src/config/database.config');
+const reservationNotificationService = require('../src/services/reservation-notification.service');
 const { createReservation } = require('../src/controllers/reserve.controller');
 
 const requestBody = {
@@ -64,13 +65,26 @@ function installConnection(t, options = {}) {
   return calls;
 }
 
+function stubNotification(t, notify = async () => ({ sent: 1 })) {
+  const originalNotify = reservationNotificationService.notifyManagersOfReservation;
+  reservationNotificationService.notifyManagersOfReservation = notify;
+  t.after(() => {
+    reservationNotificationService.notifyManagersOfReservation = originalNotify;
+  });
+}
+
 test('creates a reservation and persists its estimated cost', async (t) => {
   const calls = installConnection(t);
+  let notification;
+  stubNotification(t, async (details) => {
+    notification = details;
+    return { sent: 1 };
+  });
   const response = createResponse();
 
   await createReservation({
     body: requestBody,
-    user: { id: 12, user_type_id: 4 },
+    user: { id: 12, name: 'Utilizador de teste', user_type_id: 4 },
   }, response);
 
   assert.equal(response.statusCode, 201);
@@ -80,10 +94,16 @@ test('creates a reservation and persists its estimated cost', async (t) => {
   assert.equal(insert.params[6], 20);
   assert.ok(calls.some((call) => call.sql === 'COMMIT'));
   assert.ok(calls.some((call) => call.sql === 'RELEASE'));
+  assert.deepEqual(notification, {
+    reservationId: 321,
+    description: 'Reserva de teste',
+    requesterName: 'Utilizador de teste',
+  });
 });
 
 test('rejects a reservation whose requested quantity exceeds stock', async (t) => {
   const calls = installConnection(t, { stock: 1 });
+  stubNotification(t);
   const response = createResponse();
 
   await createReservation({
@@ -97,4 +117,26 @@ test('rejects a reservation whose requested quantity exceeds stock', async (t) =
   assert.ok(calls.some((call) => call.sql === 'ROLLBACK'));
   assert.ok(!calls.some((call) => call.sql === 'COMMIT'));
   assert.ok(calls.some((call) => call.sql === 'RELEASE'));
+});
+
+test('keeps the created reservation successful when manager email delivery fails', async (t) => {
+  installConnection(t);
+  stubNotification(t, async () => {
+    throw new Error('SMTP unavailable');
+  });
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  t.after(() => {
+    console.error = originalConsoleError;
+  });
+  const response = createResponse();
+
+  await createReservation({
+    body: requestBody,
+    user: { id: 12, name: 'Utilizador de teste', user_type_id: 4 },
+  }, response);
+
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.body.status, 'success');
+  assert.match(response.body.warning, /não foi possível notificar os gestores/);
 });
