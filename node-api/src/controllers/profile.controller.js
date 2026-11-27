@@ -2,6 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const pool = require('../config/database.config');
 const { PROFILE_DIRECTORY } = require('../middleware/profile-image.middleware');
+const { publicUser } = require('../utils/public-user');
 
 function isProvided(body, field) {
   return Object.prototype.hasOwnProperty.call(body, field);
@@ -74,11 +75,10 @@ async function updateProfile(request, response) {
       }
     }
 
-    const { password: _password, ...userWithoutPassword } = users[0];
     return response.status(200).json({
       status: 'success',
       message: 'Perfil atualizado com sucesso!',
-      user: userWithoutPassword,
+      user: publicUser(users[0]),
     });
   } catch (error) {
     if (!profileUpdated) {

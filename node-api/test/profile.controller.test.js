@@ -44,6 +44,7 @@ test('updates profile fields and omits the password from the response', async (t
         name: 'Novo nome',
         email: 'user@example.test',
         password: 'stored-hash',
+        remember_token: 'internal-token',
         phone: 912345678,
         curso: 'Informática',
         n_aluno: '12345',
@@ -70,6 +71,7 @@ test('updates profile fields and omits the password from the response', async (t
   assert.equal(response.body.user.name, 'Novo nome');
   assert.equal(response.body.user.phone, 912345678);
   assert.equal('password' in response.body.user, false);
+  assert.equal('remember_token' in response.body.user, false);
   assert.deepEqual(calls[0].params, [
     'Novo nome', '912345678', 'Informática', '12345', 'images/empty.png', 7,
   ]);
