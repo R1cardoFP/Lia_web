@@ -1,5 +1,6 @@
 const { createHash } = require('node:crypto');
 const pool = require('../config/database.config');
+const { publicUser } = require('../utils/public-user');
 
 async function requireSanctumToken(request, response, next) {
   const value = request.headers.authorization ?? '';
@@ -21,9 +22,8 @@ async function requireSanctumToken(request, response, next) {
   );
   if (utilizadores.length === 0) return response.status(401).json({ message: 'Unauthenticated.' });
 
-  const { password: _palavraPasse, ...utilizadorSemPalavraPasse } = utilizadores[0];
   request.tokenId = rows[0].id;
-  request.user = utilizadorSemPalavraPasse;
+  request.user = publicUser(utilizadores[0]);
   next();
 }
 

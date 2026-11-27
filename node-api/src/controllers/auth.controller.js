@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const { createHash, randomBytes } = require('node:crypto');
 const pool = require('../config/database.config');
+const { publicUser } = require('../utils/public-user');
 
 async function register(request, response) {
   // Valida os campos obrigatórios do registo
@@ -50,12 +51,11 @@ async function register(request, response) {
        VALUES (?, ?, 'auth_token', ?, '["*"]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       ['App\\Models\\User', userResult.insertId, tokenHash],
     );
-    const { password: _palavraPasse, ...utilizadorSemPalavraPasse } = utilizador;
     return response.status(201).json({
       status: 'success',
       message: 'Conta criada com sucesso',
       token: `${tokenResult.insertId}|${tokenTexto}`,
-      user: utilizadorSemPalavraPasse,
+      user: publicUser(utilizador),
     });
   } catch (error) {
     console.error(error);
@@ -98,12 +98,11 @@ async function login(request, response) {
        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       ['App\\Models\\User', utilizador.id, 'LIA_Mobile_App', tokenHash, '["*"]'],
     );
-    const { password: _palavraPasse, ...utilizadorSemPalavraPasse } = utilizador;
     return response.status(200).json({
       status: 'success',
       message: 'Login efetuado com sucesso.',
       token: `${tokenResult.insertId}|${tokenTexto}`,
-      user: utilizadorSemPalavraPasse,
+      user: publicUser(utilizador),
     });
   } catch (error) {
     console.error(error);
